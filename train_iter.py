@@ -5,6 +5,7 @@ import json
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
+from itertools import cycle
 
 import random
 import math
@@ -30,7 +31,7 @@ def get_args():
     # Models will be saved in /<results_folder>/<experiment_name>/
     # Tensorboard plots will be saved in /<results_folder>/runs/<experiment_name>/
     parser.add_argument('--results_folder', default='./results/', type=str, help='Save the results in the following directory')
-    parser.add_argument('--exp_name', default='test', type=str, help='Save the results in the following directory')
+    parser.add_argument('--exp_name', default='test_iter_ca', type=str, help='Save the results in the following directory')
 
     parser.add_argument('--loss_names', default=['loss_fn_1', 'loss_fn_2', 'loss_fn_3'], type=str, nargs='+', 
                         help='Loss function names to be used in Tensorboard visualization')
@@ -40,20 +41,18 @@ def get_args():
     parser.add_argument('--lr', default=1e-2, type=float, help='Optimizer learning rate')
     parser.add_argument('--optimizer', default='adamw', type=str, help='Optimizer (sgd/adam/adamw)')
     parser.add_argument('--weight_decay', default=0, type=float, help='Optimizer weight decay')
-    parser.add_argument('--lr_scheduler', default='none', type=str, 
+    parser.add_argument('--lr_scheduler', default='cosine_annealing', type=str, 
                         help='Optimizer learning rate schedule (none/cosine_annealing/cosine_annealing_warm_restart)')
     parser.add_argument('--cawr_restart_iter', default=200, type=int, help='Restart at cosine annealig at the following itertion')
     parser.add_argument('--lwca_warmup_iter', default=1000, type=int, help='Warmup iterations for linear warmup cosine annealing')
 
-    parser.add_argument('--num_epochs', default=10, type=int, help='Number of epochs')
-    parser.add_argument('--batch_size', default=16, type=int, help='Batch size')
+    parser.add_argument('--num_iterations', default=1000, type=int, help='Number of epochs')
+    parser.add_argument('--batch_size', default=2, type=int, help='Batch size')
 
-    parser.add_argument('--validate', default='none', type=str, help='Validate the model (none/iteration/epochs)')
-    parser.add_argument('--iter_val_freq', default=1000, type=int, help='Validating frequency per iteration')
-    parser.add_argument('--epoch_val_freq', default=1, type=int, help='Validating frequency per epoch')
+    parser.add_argument('--validate', default='none', type=str, help='Validate the model (none/iterations)')
+    parser.add_argument('--iter_val_freq', default=100, type=int, help='Validating frequency per iteration')
 
-    parser.add_argument('--epoch_save_freq', default=1, type=int, help='Saving frequency per epoch (Do not save if 0)')
-    parser.add_argument('--iter_save_freq', default=0, type=int, help='Saving frequency per iteration (Do not save if 0)')
+    parser.add_argument('--iter_save_freq', default=100, type=int, help='Saving frequency per iteration (Do not save if 0)')
     parser.add_argument('--max_iter', default=0, type=int, help='Number of epochs')
 
     return parser.parse_args()
@@ -91,6 +90,7 @@ def main(args):
                                     ])
     train_data = CustomDataset(img_dir, df_data, train_transform)
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    train_iter_loader = iter(train_loader)
 
     if args.validate != 'none':
         df_data_val = pd.read_csv(data_csv)
@@ -118,86 +118,69 @@ def main(args):
         optimizer = torch.optim.AdamW(param_list, lr=args.lr, weight_decay=args.weight_decay)
 
     if args.lr_scheduler == 'cosine_annealing':
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs*len(train_loader))
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_iterations)
     if args.lr_scheduler == 'cosine_annealing_warm_restart':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=args.cawr_restart_iter)
     if args.lr_scheduler == 'linear_warmup_cosine_annealing':
         lr_lambda = (
             lambda cur_iter: cur_iter / args.lwca_warmup_iter
             if cur_iter <= args.lwca_warmup_iter
-            else 0.5 * (1 + math.cos(math.pi * (cur_iter - args.lwca_warmup_iter) / (args.num_epochs*len(train_loader) - args.lwca_warmup_iter)))
+            else 0.5 * (1 + math.cos(math.pi * (cur_iter - args.lwca_warmup_iter) / (args.num_iterations - args.lwca_warmup_iter)))
         )
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     
     if 'loss_fn_1' in loss_terms:
         criterion_1 = CustomLoss()
 
-    iterations = 0
-    for epoch in tqdm(range(args.num_epochs)):
-        for batch, (x, y) in enumerate(tqdm(train_loader)):
-            iterations += 1
-            x, y = x.to(args.device), y.to(args.device)
-            optimizer.zero_grad()
-            
-            loss_name = 'loss_fn_1'
-            if loss_name in loss_terms and loss_terms[loss_name]['warm_start_iter'] < iterations:
-                y_pred = model(x)
-                loss_terms[loss_name]['loss'] = loss_terms[loss_name]['lambda'] * criterion_1(y_pred.view(-1), y)
-                writer.add_scalar('loss/%s'%loss_name, loss_terms[loss_name]['loss'].item(), iterations)
-            
-            loss_name = 'loss_fn_2'
-            if loss_name in loss_terms and loss_terms[loss_name]['warm_start_iter'] < iterations:
-                y_pred = model(x)
-                loss_terms[loss_name]['loss'] = loss_terms[loss_name]['lambda'] * F.mse_loss(y_pred.view(-1), y)
-                writer.add_scalar('loss/%s'%loss_name, loss_terms[loss_name]['loss'].item(), iterations)
-            
-            # Plots learning rate
-            for param_group in optimizer.param_groups:
-                lr = param_group['lr']
-                break
-            writer.add_scalar('extra_info/LR', lr, iterations)
-
-            # Sum up all the non-zero losses
-            loss = torch.sum(torch.cat([loss_terms[loss_name]['loss'].unsqueeze(0) for loss_name in args.loss_names if loss_name in loss_terms], dim=0))
-
-            loss.backward()
-            optimizer.step()
-            if args.lr_scheduler != 'none':
-                scheduler.step()
-            writer.add_scalar('loss', loss.item(), iterations)
-
-            if args.iter_save_freq:
-                if iterations % args.iter_save_freq == 0:
-                    torch.save(model.state_dict(), os.path.join(model_loc, 'model_iter_%06d.pth'%(iterations)))
-                
-            if args.validate == 'iterations' and iterations % args.iter_val_freq == 0:
-                model.eval()
-                perf = test_model(model, val_loader, device=args.device)
-                writer.add_scalar('val/perf', perf, iterations)
-                if perf > best_perf:    # if error metric, multiply it with -1 to get the best model when perf is maximum.
-                    torch.save(model.state_dict(), os.path.join(model_loc, 'best_iter_model.pth'))
-                    best_perf = perf
-                    print('Best model obtained at iteration: %d'%iterations)
-                model.train()
-            
-            # Stop training if number of iterations go beyond max_iter
-            if args.max_iter:
-                if iterations >= args.max_iter:
-                    break
-
-            writer.add_scalar('epoch', epoch, iterations)
+    for iterations in tqdm(range(1, args.num_iterations+1)):
+        try:
+            x, y = next(train_iter_loader)
+        except StopIteration:
+            train_iter_loader = iter(train_loader)
+            x, y = next(train_iter_loader)
         
-        if iterations % args.epoch_save_freq == 0:
-            torch.save(model.state_dict(), os.path.join(model_loc, 'model_epoch_%06d.pth'%(epoch+1)))
+        x, y = x.to(args.device), y.to(args.device)
+        optimizer.zero_grad()
         
-        if args.validate == 'epochs' and iterations % args.epoch_val_freq == 0:
+        loss_name = 'loss_fn_1'
+        if loss_name in loss_terms and loss_terms[loss_name]['warm_start_iter'] < iterations:
+            y_pred = model(x)
+            loss_terms[loss_name]['loss'] = loss_terms[loss_name]['lambda'] * criterion_1(y_pred.view(-1), y)
+            writer.add_scalar('loss/%s'%loss_name, loss_terms[loss_name]['loss'].item(), iterations)
+        
+        loss_name = 'loss_fn_2'
+        if loss_name in loss_terms and loss_terms[loss_name]['warm_start_iter'] < iterations:
+            y_pred = model(x)
+            loss_terms[loss_name]['loss'] = loss_terms[loss_name]['lambda'] * F.mse_loss(y_pred.view(-1), y)
+            writer.add_scalar('loss/%s'%loss_name, loss_terms[loss_name]['loss'].item(), iterations)
+        
+        # Plots learning rate
+        for param_group in optimizer.param_groups:
+            lr = param_group['lr']
+            break
+        writer.add_scalar('extra_info/LR', lr, iterations)
+
+        # Sum up all the non-zero losses
+        loss = torch.sum(torch.cat([loss_terms[loss_name]['loss'].unsqueeze(0) for loss_name in args.loss_names if loss_name in loss_terms], dim=0))
+
+        loss.backward()
+        optimizer.step()
+        if args.lr_scheduler != 'none':
+            scheduler.step()
+        writer.add_scalar('loss', loss.item(), iterations)
+
+        if args.iter_save_freq:
+            if iterations % args.iter_save_freq == 0:
+                torch.save(model.state_dict(), os.path.join(model_loc, 'model_iter_%06d.pth'%(iterations)))
+            
+        if args.validate == 'iterations' and iterations % args.iter_val_freq == 0:
             model.eval()
             perf = test_model(model, val_loader, device=args.device)
             writer.add_scalar('val/perf', perf, iterations)
             if perf > best_perf:    # if error metric, multiply it with -1 to get the best model when perf is maximum.
-                torch.save(model.state_dict(), os.path.join(model_loc, 'best_epoch_model.pth'))
+                torch.save(model.state_dict(), os.path.join(model_loc, 'best_iter_model.pth'))
                 best_perf = perf
-                print('Best model obtained at epoch: %d'%(epoch+1))
+                print('Best model obtained at iteration: %d'%iterations)
             model.train()
         
         # Stop training if number of iterations go beyond max_iter
