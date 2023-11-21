@@ -41,7 +41,7 @@ def get_args():
     parser.add_argument('--lr', default=1e-2, type=float, help='Optimizer learning rate')
     parser.add_argument('--optimizer', default='adamw', type=str, help='Optimizer (sgd/adam/adamw)')
     parser.add_argument('--weight_decay', default=0, type=float, help='Optimizer weight decay')
-    parser.add_argument('--lr_scheduler', default='cosine_annealing', type=str, 
+    parser.add_argument('--lr_scheduler', default='none', type=str, 
                         help='Optimizer learning rate schedule (none/cosine_annealing/cosine_annealing_warm_restart)')
     parser.add_argument('--cawr_restart_iter', default=200, type=int, help='Restart at cosine annealig at the following itertion')
     parser.add_argument('--lwca_warmup_iter', default=1000, type=int, help='Warmup iterations for linear warmup cosine annealing')
