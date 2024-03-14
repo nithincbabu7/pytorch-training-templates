@@ -12,4 +12,4 @@ python train_iter.py --exp_name test --num_iterations 1000 --batch_size 16
 ```
 
 ## Custom models
-Highly customizable and intuitive model definitions for MLPs and self-attention based aggregators available in [`graphs/models/custom_models.py`](https://github.com/nithincbabu7/pytorch-training-templates/blob/main/graphs/losses/custom_losses.py)
+Highly customizable and intuitive model definitions for MLPs and self-attention based aggregators available in [`graphs/models/custom_models.py`](https://github.com/nithincbabu7/pytorch-training-templates/blob/main/graphs/losses/custom_models.py)
