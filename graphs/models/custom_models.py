@@ -66,7 +66,7 @@ class AttentionAggregator(nn.Module):
 if __name__ == '__main__':
 
     # Example usage of MLP model
-    # (1024 -> 512) - (BatchNorm) -> (ReLU) -> (Dropout) -> (512 -> 10)
+    # Linear(1024 -> 512) -> (BatchNorm) -> (ReLU) -> (Dropout) -> Linear(512 -> 10)
     mlp_model = MLP(dimension_list=[1024, 512, 10], mlp_layers=['linear', 'bn', 'relu', 'dropout', 'linear'])
     x = torch.randn(32, 1024) # 32 samples, 1024 features
     out = mlp_model(x)  # (32, 10)
@@ -74,4 +74,7 @@ if __name__ == '__main__':
     # Example usage of AttentionAggregator model
     aggregate_model = AttentionAggregator(embed_dim=1024, num_heads=1)
     x = torch.randn(32, 10, 1024)  # 32 samples, 10 features, 1024 dimensions
-    out = aggregate_model(x)  # {'output': (32, 1024), 'x_out': (32, 11, 1024), 'attn_weights': (32, 11, 11)}
+    out = aggregate_model(x)
+    # out['output'] -> (32, 1024) - 32 samples, 1024 dimensions (the 10 features are aggregated adaptively)
+    # out['x_out'] -> (32, 11, 1024) - 32 samples, 11 features, 1024 dimensions (added CLS token)
+    # out['attn_weights'] -> (32, 32, 11) - 32 samples, 32x11 attention matrix
