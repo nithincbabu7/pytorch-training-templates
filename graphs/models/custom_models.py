@@ -3,9 +3,9 @@ import torch.nn as nn
 
 
 class MLP(nn.Module):
-    def __init__(self, dimension_list, mlp_layers=['linear', 'bn', 'relu', 'dropout', 'linear']):
+    def __init__(self, dimension_list, mlp_layers=['linear', 'bn', 'relu', 'dropout', 'linear'], drp_p=0.1):
         super().__init__()
-
+        self.drp_p = drp_p
         layer_list = []
         dimension_pair_list = list(zip(dimension_list, dimension_list[1:]+[dimension_list[-1]]))
         j=0
@@ -26,7 +26,7 @@ class MLP(nn.Module):
         if layer_name == 'linear':
             return nn.Linear(in_features=dimensions[0], out_features=dimensions[1])
         elif layer_name == 'dropout':
-            return nn.Dropout(0.5)
+            return nn.Dropout(self.drp_p)
         elif layer_name == 'bn':
             return nn.BatchNorm1d(num_features=dimensions[0])
         elif layer_name == 'ln':
@@ -49,17 +49,36 @@ class MLP(nn.Module):
 
 # Self attention based aggregator to mix arbitrary number of features into one. Adds CLS token to aggregate features.
 class AttentionAggregator(nn.Module):
-    def __init__(self, embed_dim, num_heads=1):
+    def __init__(self, embed_dim, num_heads=8, num_layers=8, add_mlp=True, add_ln=True, residual=True):
         super().__init__()
-        self.self_attention_aggregator = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True)
+        self.num_layers = num_layers
+        self.add_mlp = add_mlp
+        self.add_ln = add_ln
+        self.residual = residual
+        self.self_attention_aggregators = nn.ModuleList([nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True) for _ in range(num_layers)])
+        if add_mlp:
+            self.mlps = nn.ModuleList([MLP([embed_dim, embed_dim], mlp_layers=['linear', 'dropout'], drp_p=0.1) for _ in range(num_layers)])
+        if add_ln:
+            self.lns = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(num_layers)])
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim), requires_grad=True)
 
-    def forward(self, x):
-        x = torch.cat([self.cls_token.expand(x.size(0), -1, -1), x], dim=1)
-        x_out, attn_weights = self.self_attention_aggregator(x, x, x, need_weights=True, average_attn_weights=False)
-        return {'output': x_out[:, 0, :].unsqueeze(0),
-                'x_out': x_out,
-                'attn_weights': attn_weights,
+    def forward(self, x):   # B x L x F
+        x = torch.cat([self.cls_token.expand(x.size(0), -1, -1), x], dim=1)     # B x (L+1) x F
+        
+        attn_weights_list = []
+        hidden_layers = []
+        for i in range(self.num_layers):
+            x_out, attn_weights = self.self_attention_aggregators[i](x, x, x, need_weights=True, average_attn_weights=False)
+            attn_weights_list.append(attn_weights)
+            if self.add_mlp:
+                x_out = self.mlps[i](x_out)
+            x = x + x_out if self.residual else x_out
+            if self.add_ln:
+                x = self.lns[i](x)      # LayerNorm after adding residual - similar to Bert
+            hidden_layers.append(x)
+        return {'output': x[:, 0, :].unsqueeze(0),      # B x 1 x F
+                'hidden_layers': hidden_layers,         # List of B x (L+1) x F
+                'attn_weights': attn_weights_list,      # List of B x H x (L+1) x (L+1)
                 }
 
 
@@ -75,6 +94,4 @@ if __name__ == '__main__':
     aggregate_model = AttentionAggregator(embed_dim=1024, num_heads=1)
     x = torch.randn(32, 10, 1024)  # 32 samples, 10 features, 1024 dimensions
     out = aggregate_model(x)
-    # out['output'] -> (32, 1024) - 32 samples, 1024 dimensions (the 10 features are aggregated adaptively)
-    # out['x_out'] -> (32, 11, 1024) - 32 samples, 11 features, 1024 dimensions (added CLS token)
-    # out['attn_weights'] -> (32, 32, 11) - 32 samples, 32x11 attention matrix
+    # out['output'] -> (32, 1, 1024) - 32 samples, 1024 dimensions (the 10 features are aggregated adaptively)
