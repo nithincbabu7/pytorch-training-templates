@@ -76,7 +76,7 @@ class AttentionAggregator(nn.Module):
             if self.add_ln:
                 x = self.lns[i](x)      # LayerNorm after adding residual - similar to Bert
             hidden_layers.append(x)
-        return {'output': x[:, 0, :].unsqueeze(0),      # B x 1 x F
+        return {'output': x[:, :1, :],                  # B x 1 x F (CLS token output)
                 'hidden_layers': hidden_layers,         # List of B x (L+1) x F
                 'attn_weights': attn_weights_list,      # List of B x H x (L+1) x (L+1)
                 }
@@ -86,12 +86,15 @@ if __name__ == '__main__':
 
     # Example usage of MLP model
     # Linear(1024 -> 512) -> (BatchNorm) -> (ReLU) -> (Dropout) -> Linear(512 -> 10)
-    mlp_model = MLP(dimension_list=[1024, 512, 10], mlp_layers=['linear', 'bn', 'relu', 'dropout', 'linear'])
-    x = torch.randn(32, 1024) # 32 samples, 1024 features
+    mlp_model = MLP(dimension_list=[1024, 512, 10], mlp_layers=['linear', 'bn', 'relu', 'dropout', 'linear']).cuda()
+    x = torch.randn(32, 1024).cuda() # 32 samples, 1024 features
     out = mlp_model(x)  # (32, 10)
 
     # Example usage of AttentionAggregator model
-    aggregate_model = AttentionAggregator(embed_dim=1024, num_heads=1)
-    x = torch.randn(32, 10, 1024)  # 32 samples, 10 features, 1024 dimensions
+    aggregate_model = AttentionAggregator(embed_dim=1024).cuda()
+    x = torch.randn(32, 10, 1024).cuda()  # 32 samples, 10 features, 1024 dimensions
     out = aggregate_model(x)
-    # out['output'] -> (32, 1, 1024) - 32 samples, 1024 dimensions (the 10 features are aggregated adaptively)
+    # out['output'] -> (32, 1, 1024) - 32 samples, 1024 dimensions (the 10 features are aggregated adaptively. CLS token output is taken as the final result)
+    # out['hidden_layers'] -> List of (32, 11, 1024) - 32 samples, 11 features, 1024 dimensions (hidden layers of the model)
+    #                      -> out['hidden_layers'][-1] - the output layer including all the other features.
+    # out['attn_weights'] -> List of (32, 8, 11, 11) - 32 samples, 8 heads, 11 features, 11 features (attention weights of each layer)
